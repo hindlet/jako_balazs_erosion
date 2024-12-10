@@ -11,7 +11,7 @@ A simualtion of hydraulic erosion based on the paper: "Fast Hydraulic and Therma
 
 MIT License
 
-Copyright (c) 2024 Hindlet
+Copyright (c) 2024 Thomas Hindle
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
