@@ -6,7 +6,12 @@ edition = "2021"
 [dependencies]
 image = "0.25.5"
 maths = {git = "https://github.com/hindlet/rust_maths.git", package = "rust_maths", version = "*"}
-vulkano = "0.34.0"
-vulkano-shaders = "0.34.0"
-vulkano-util = "0.34.1"
-winit = {version = "0.30.5", default-features = true }
+
+
+vulkano = {git = "https://github.com/vulkano-rs/vulkano", package = "vulkano", branch = "master"}
+vulkano-shaders = {git = "https://github.com/vulkano-rs/vulkano", package = "vulkano-shaders", branch = "master"}
+vulkano-util = {git = "https://github.com/vulkano-rs/vulkano", package = "vulkano-util", branch = "master"}
+
+
+
+winit = "0.30"
