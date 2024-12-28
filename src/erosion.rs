@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
-use vulkano::{sync::GpuFuture, buffer::BufferContents, command_buffer::{allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents}, descriptor_set::allocator::StandardDescriptorSetAllocator, image::view::ImageView, pipeline::{graphics::{color_blend::{ColorBlendAttachmentState, ColorBlendState}, input_assembly::InputAssemblyState, multisample::MultisampleState, rasterization::RasterizationState, vertex_input::{Vertex, VertexDefinition}, viewport::{Viewport, ViewportState}, GraphicsPipelineCreateInfo}, layout::PipelineDescriptorSetLayoutCreateInfo, DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo}, render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass}};
+use maths::{Camera, Matrix4};
+use vulkano::{buffer::{allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo}, Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer}, command_buffer::{allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents}, descriptor_set::{allocator::StandardDescriptorSetAllocator, DescriptorSet, WriteDescriptorSet}, image::view::ImageView, memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator}, pipeline::{graphics::{color_blend::{ColorBlendAttachmentState, ColorBlendState}, input_assembly::InputAssemblyState, multisample::MultisampleState, rasterization::RasterizationState, vertex_input::{Vertex, VertexDefinition}, viewport::{Viewport, ViewportState}, GraphicsPipelineCreateInfo}, layout::PipelineDescriptorSetLayoutCreateInfo, DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo}, render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass}, sync::GpuFuture};
 use vulkano_util::{context::VulkanoContext, window::VulkanoWindows};
 use winit::{application::ApplicationHandler, event::WindowEvent, event_loop::ActiveEventLoop, window::WindowId};
 
@@ -32,11 +33,21 @@ mod fs {
 
 
 pub struct ErosionApp {
-    pub context: VulkanoContext,
-    pub windows: VulkanoWindows,
-    pub command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
-    pub descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-    pub render_context: Option<RenderContext>,
+    context: VulkanoContext,
+    windows: VulkanoWindows,
+
+    memory_allocator: Arc<StandardMemoryAllocator>,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    uniform_buffer_allocator: SubbufferAllocator,
+
+    camera: Camera<winit::keyboard::KeyCode>,
+    render_context: Option<RenderContext>,
+
+    width: usize,
+    height: usize,
+    mesh_vertices: Subbuffer<[MeshVertex]>,
+    mesh_indices: Subbuffer<[u32]>
 }
 
 struct RenderContext {
@@ -48,7 +59,9 @@ struct RenderContext {
 
 impl ErosionApp {
     pub fn new(
-
+        map_width: usize,
+        map_height: usize,
+        camera: Camera<winit::keyboard::KeyCode>
     ) -> Self {
 
         let context = VulkanoContext::default();
@@ -61,6 +74,19 @@ impl ErosionApp {
             Default::default()
         ));
 
+        let memory_allocator =Arc::new(StandardMemoryAllocator::new_default(context.device().clone()));
+
+        let uniform_buffer_allocator = SubbufferAllocator::new(
+            memory_allocator.clone(),
+            SubbufferAllocatorCreateInfo {
+                buffer_usage: BufferUsage::UNIFORM_BUFFER,
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            }
+        );
+
+        let (mesh_vertices, mesh_indices) = gen_mesh_vertices(map_width, map_height, 1.0, memory_allocator.clone());
+
 
         Self {
             context,
@@ -68,6 +94,13 @@ impl ErosionApp {
             command_buffer_allocator,
             descriptor_set_allocator,
             render_context: None,
+            camera,
+            memory_allocator,
+            uniform_buffer_allocator,
+            mesh_vertices,
+            mesh_indices,
+            width: map_width,
+            height: map_height
         }
     }
 }
@@ -187,7 +220,7 @@ impl ApplicationHandler for ErosionApp {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        window_id: WindowId,
+        _window_id: WindowId,
         event: WindowEvent,
     ) {
         let window_renderer = self.windows.get_primary_renderer_mut().unwrap();
@@ -213,6 +246,25 @@ impl ApplicationHandler for ErosionApp {
                     return;
                 }
 
+                // generate uniform buffer
+                let uniform_buffer = {
+                    let view = self.camera.get_view_matrix();
+                    let proj = Matrix4::persective_matrix(std::f32::consts::FRAC_PI_2, window_size.width as f32 / window_size.height as f32, 0.01, 100.0);
+
+                    let uniform_data = vs::Data {
+                        view: view.into(),
+                        proj: proj.into()
+                    };
+
+                    let buffer = self.uniform_buffer_allocator.allocate_sized().unwrap();
+                    *buffer.write().unwrap() = uniform_data;
+
+                    buffer
+                };
+
+
+
+
                 // get previous frame end from window render
                 let previous_frame_end = window_renderer
                     .acquire(Some(Duration::from_millis(1000)), |swapchain_images| {
@@ -231,20 +283,41 @@ impl ApplicationHandler for ErosionApp {
                 ).unwrap();
 
 
-                builder.begin_render_pass(
-                    RenderPassBeginInfo {
-                        clear_values: vec![Some([0.0, 0.0, 1.0, 1.0].into())],
-                        
-                        ..RenderPassBeginInfo::framebuffer(
-                            rcx.framebuffers[window_renderer.image_index() as usize].clone(),
-                        )
-                    },
-                    SubpassBeginInfo {
-                        contents: SubpassContents::Inline,
-                        ..Default::default()
-                    }
-                )
-                .unwrap();
+                // build descriptor set
+                let layout = &rcx.pipeline.layout().set_layouts()[0];
+                let descriptor_set = DescriptorSet::new(
+                    self.descriptor_set_allocator.clone(),
+                    layout.clone(),
+                    [WriteDescriptorSet::buffer(0, uniform_buffer)],
+                    []
+                ).unwrap();
+
+
+                builder
+                    .begin_render_pass(
+                        RenderPassBeginInfo {
+                            clear_values: vec![Some([0.0, 0.0, 1.0, 1.0].into())],
+                            
+                            ..RenderPassBeginInfo::framebuffer(
+                                rcx.framebuffers[window_renderer.image_index() as usize].clone(),
+                            )
+                        },
+                        SubpassBeginInfo {
+                            contents: SubpassContents::Inline,
+                            ..Default::default()
+                        }
+                    )
+                    .unwrap()
+                    .bind_pipeline_graphics(rcx.pipeline.clone())
+                    .unwrap()
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Graphics,
+                        rcx.pipeline.layout().clone(),
+                        0,
+                        descriptor_set
+                    )
+                    .unwrap();
+                
 
 
                 builder.end_render_pass(Default::default()).unwrap();
@@ -285,6 +358,64 @@ struct VertexHeight {
 }
 
 
+
+fn gen_mesh_vertices(
+    width: usize,
+    height: usize,
+    gap: f32,
+
+    allocator: Arc<StandardMemoryAllocator>
+) -> (Subbuffer<[MeshVertex]>, Subbuffer<[u32]>){
+    let mut mesh_vertices = Vec::with_capacity(width * height);
+    let mut mesh_indices = Vec::with_capacity((width - 1) * (height - 1) * 6);
+    let u32_height = height as u32;
+
+    for x in 0..width {
+        for y in 0..height {
+            mesh_vertices.push(MeshVertex{position: [x as f32 * gap, y as f32 * gap]});
+
+            if x != (width - 1) && y != (height - 1) {
+                let curr_index = (mesh_vertices.len() - 1) as u32;
+                mesh_indices.push(curr_index);
+                mesh_indices.push(curr_index + 1);
+                mesh_indices.push(curr_index + u32_height + 1);
+                mesh_indices.push(curr_index);
+                mesh_indices.push(curr_index + u32_height + 1);
+                mesh_indices.push(curr_index + u32_height);
+            } 
+
+        }
+    }
+
+    let vertex_buffer = Buffer::from_iter(
+        allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::VERTEX_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        mesh_vertices
+    ).unwrap();
+
+    let index_buffer = Buffer::from_iter(
+        allocator,
+        BufferCreateInfo {
+            usage: BufferUsage::INDEX_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        mesh_indices
+    ).unwrap();
+
+    (vertex_buffer, index_buffer)
+
+}   
 
 
 
