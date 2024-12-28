@@ -1540,7 +1540,7 @@ dependencies = [
 [[package]]
 name = "rust_maths"
 version = "0.1.0"
-source = "git+https://github.com/hindlet/rust_maths.git#c0d6bff2e02e873d5fde0467f1f69ca1162693dc"
+source = "git+https://github.com/hindlet/rust_maths.git#851290cecae9e0848182e32de4144ff759ca4bc2"
 dependencies = [
  "rand",
  "rand_chacha",
