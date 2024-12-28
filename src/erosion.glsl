@@ -3,7 +3,6 @@
 layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
 
-
 struct Cell {
     float terrain_height;
     float water_height;
@@ -11,7 +10,9 @@ struct Cell {
     float sediment_capacity;
     vec4 outflow_flux;
     vec2 velocity;
+    float local_hardness;
 };
+
 
 
 
@@ -24,6 +25,9 @@ layout(set = 0, binding = 1) buffer Cells {
     Cell[] cells;
 };
 
+layout(set = 0, binding = 2) buffer VertexHeights {
+    float[] heights;
+};
 
 
 layout(push_constant) uniform PushConstants {
@@ -206,9 +210,13 @@ void main() {
     if (push_constants.sim_step == 3) {
         
         // erode
-        // if (cell.sediment_capacity > cell.suspended_sediment) {
-            
-        // }
+        if (cell.sediment_capacity > cell.suspended_sediment) {
+            float delta_sediment = push_constants.delta_time * cell.local_hardness * push_constants.dissolving_constant * (cell.sediment_capacity - cell.suspended_sediment);
+
+            cell.terrain_height -= delta_sediment;
+            cell.suspended_sediment += delta_sediment;
+            cell.water_height += delta_sediment;
+        }
 
 
         // deposit
